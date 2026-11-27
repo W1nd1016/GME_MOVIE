@@ -1,0 +1,7 @@
+data:
+  split: synthetic_smoke
+  rows: 32
+seed: 123
+batch_size: 8
+steps: 6
+learning_rate: 0.001
