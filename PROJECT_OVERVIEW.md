@@ -1,5 +1,7 @@
 # GME Movie 项目全面说明
 
+本文记录仓库根目录的旧 TF1 实现，其中可选的 warm-up 只有 A、B 两轮。阶段 0 将使用现有 MovieLens 数据，按逻辑批次评估三轮 warm-up，见 [ROADMAP.md](ROADMAP.md)。
+
 ## 1. 项目概述
 
 本项目是一个面向电影推荐冷启动问题的离线实验工程。它先用历史交互训练一个基础 CTR（点击率）预测 DNN，再为交互不足的新电影生成更合适的 `movie_id` embedding，以改善冷启动电影的推荐效果。
@@ -204,7 +206,9 @@ warm-up 仅更新 `emb_mat`，不更新 DNN 全连接层。
 - TensorFlow 1.x，或经过兼容改造的 TensorFlow 2.x `compat.v1` 环境；
 - 可选 CUDA/GPU，代码也可在 CPU 上运行。
 
-仓库没有 `requirements.txt`、Conda 环境文件或安装脚本。当前工作环境为 Python 3.12.3，且没有安装 NumPy、TensorFlow、scikit-learn；因此本次只完成了源码、数据和语法层面的核查，没有实际重新训练。五个 Python 文件均通过 Python 3.12 的语法编译检查。
+编写本说明时，仓库没有依赖清单或安装脚本。当时使用的 Mac 环境为 Python 3.12.3，缺少 NumPy、TensorFlow 和 scikit-learn。该次核查覆盖源码和数据，五个 Python 文件均通过语法编译检查，未重新训练。
+
+当前开发、训练与评测均在本机 WSL2 Ubuntu 进行。旧代码可使用本机的 Conda 环境 `gme_movie_tf1`（Python 3.7.16、TensorFlow 1.15.0），已在该环境读取 `tmp/dnn/` 的基础模型检查点。新代码的运行约定见 [AGENTS.md](AGENTS.md)。
 
 ### 9.2 原始运行顺序
 

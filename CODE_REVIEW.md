@@ -2,7 +2,8 @@
 
 > 目标：为推荐算法岗面试深挖、优化这个冷启动项目做准备。
 > 方法：逐行阅读全部源码，用纯 Python 脚本解析所有 CSV 和 TFRecord（包括没有 CSV 的 `test_test_w_ngb_hist.tfrecord`，共 123,787 行），交叉核对 ID、样本配对和 `hist` 字段的含义。
-> 限制：本机没有 TensorFlow，**没有重新训练**。文中的数字都来自数据统计和已有日志，不是复现出来的 AUC。
+> 审查时使用的 Mac 环境未安装 TensorFlow。当时没有重新训练，文中的数字来自数据统计和已有日志。
+> 本报告讨论旧 TF1 脚本及其两轮 warm-up。阶段 0 将在现有 MovieLens 数据上按逻辑批次评估三轮 warm-up，见 [ROADMAP.md](ROADMAP.md)。当前开发、训练与评测均在本机 WSL2 Ubuntu 进行，环境约定见 [AGENTS.md](AGENTS.md)。
 
 ---
 
@@ -238,7 +239,7 @@ meta_loss = α·loss_a + (1-α)·loss_b (+ 对比损失)
 
 ## 4. P2：工程问题（不影响结论，但面试可能会被看代码）
 
-- TensorFlow 1.x 的 queue runner 写法，现在的环境跑不起来；没有 `requirements.txt`；
+- 旧脚本依赖 TensorFlow 1.x 的 queue runner。审查时的 Mac 环境缺少运行依赖，仓库当时没有 `requirements.txt`。
 - 配置和代码脱节：`config_dnn.py` 导入了但没用；`config_gme.py` 里的数据路径、`model_loading_addr` 都被硬编码覆盖，`warm_up_bool` 也在脚本里被重新赋值；
 - warm-up 阶段用 Adam 更新**整张 `emb_mat`**（包括用户和老电影），并没有只更新新 item；第二次 `saver.restore` 也没有重置 Adam 的状态；
 - 结果表头有 bug：第 4 列应该是 `warm2 auc`，现在写成了重复的 `warm1 auc`（[warm_up_dnn_base.py:752](warm_up_dnn_base.py:752)）；
