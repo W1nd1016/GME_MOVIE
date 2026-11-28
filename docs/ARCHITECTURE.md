@@ -2,7 +2,7 @@
 
 本文件描述新 PyTorch 代码的**结构**：模块分工、数据流、接口约定和不变量的测试归属。旧 TF1 代码见 [PROJECT_OVERVIEW.md](../PROJECT_OVERVIEW.md)，阶段与任务编号见 [ROADMAP.md](../ROADMAP.md)。
 
-**当前状态（2026-11-28）**：0.1 已实现数据转换、按用途读取、CTR 底座和 CPU 冒烟训练。后续模块在表中标为“规划”，路径在对应任务的计划中确认。
+截至 2026-11-29，0.1 和 0.4 已实现数据转换、物品级留出、按用途读取交互，以及共用 CTR 底座的预训练。三轮测试侧到达批次由后续任务 0.5 定义。
 
 ---
 
@@ -12,10 +12,11 @@
 |---|---|---|---|
 | `scripts/convert_movielens.py` | 读取旧 TFRecord，输出按用途分开的样本 NPZ、物品元数据表和清单 | 0.1 | 已实现 |
 | `src/coldstart/data/schema.py` | 特征槽位定义、数据用途（split）枚举与各用途的允许用法。全项目唯一的定义处 | 0.1 | 已实现 |
-| `src/coldstart/data/movielens.py` | 加载 NPZ 和物品表，提供 Dataset；按用途做访问检查 | 0.1 | 已实现 |
+| `src/coldstart/data/movielens.py` | 加载 NPZ 和物品表，为底座训练与元训练提供按已验证电影清单筛选的 Dataset | 0.1、0.4 | 已实现 |
 | `src/coldstart/models/base_dnn.py` | CTR 底座：按 schema 查表、槽位池化、MLP 输出 logit | 0.1 | 已实现 |
-| `scripts/train_base.py`、`configs/*.yaml` | 训练入口与实验配置 | 0.1 | 已实现 |
-| `src/coldstart/data/splits.py` | 物品级留出（底座电影 / 伪新电影）；三轮到达批次划分 | 0.4、0.5 | 规划 |
+| `scripts/train_base.py`、`configs/*.yaml` | 运行合成冒烟或真实底座预训练，保存权重、配置和重载记录 | 0.1、0.4 | 已实现 |
+| `src/coldstart/data/splits.py`、`scripts/prepare_holdout.py` | 生成和核验物品级留出清单，统计伪新与测试电影的邻居覆盖，通过 CLI 发布两份派生产物 | 0.4 | 已实现 |
+| `src/coldstart/data/splits.py`（后续扩展） | 为测试电影划分三轮逻辑到达批次 | 0.5 | 规划 |
 | `src/coldstart/data/visible_hist.py` | 按"已开放批次"重建正反馈用户集合，训练侧与测试侧共用 | 0.2、0.3 | 规划 |
 | `src/coldstart/eval/` | AUC、GAUC、logloss；四个测点评估；多种子汇总 | 0.7 | 规划 |
 | `src/coldstart/models/generators/` | 0.2 以最小属性生成器打通元训练与评分；0.6 扩充 Meta-Embedding、GME-P/G/A、MWUF、CVAR 等基线 | 0.2、0.6 | 规划 |
@@ -32,9 +33,13 @@
                                 └─ manifest.json（源文件、用途、行数）
 合成冒烟数据 ─▶ MovieLensDataset ─▶ train_base.py / BaseDNN ─▶ runs/0.1-smoke/
 
-后续任务的数据流：
-base_candidate ─▶ 0.4 底座组交互 ─▶ 预训练 DNN ─▶ 共用 checkpoint
-meta_a/b ─▶ 0.4 伪新组 A/B ─▶ 0.2 属性生成、A 上适配与校准 ─▶ 冻结底座对 B 评分
+base_candidate + meta_a/b 的电影 ID + items.npz
+  └─ prepare_holdout.py ─▶ artifacts/holdouts/0.4/{holdout.json, neighbors.json}
+base_candidate + holdout.json ─▶ base_train ─▶ train_base.py / BaseDNN ─▶ runs/0.4-base/
+meta_a/b + holdout.json ─▶ 伪新电影 A/B
+
+后续任务
+伪新电影 A/B ─▶ 0.2 属性生成、A 上适配与校准 ─▶ 冻结底座对 B 评分
 warm_a/b ─▶ 0.5 固定到达批次 ─▶ 0.3 逐轮更新可见历史与电影表示
 各测点电影表示 + final_eval ─▶ 共用底座评分 ─▶ 0.7 指标 ─▶ 0.6 基线对比
 ```
@@ -52,7 +57,15 @@ warm_a/b ─▶ 0.5 固定到达批次 ─▶ 0.3 逐轮更新可见历史与电
 
 转换器按源文件行序写出 `<split>.npz`，含 `label`（uint8，形状 `[N]`，值为 0/1）和 `features`（int32，形状 `[N, 16]`，0 为填充）。`manifest.json` 的 `splits[split]` 记录 `source` 和 `rows`。旧 `hist` 不转换，邻居 ID 进入物品表。
 
-`MovieLensDataset(root, split, purpose)` 按 schema 检查用途，再加载并校验行数、字段和取值；每条返回 `(features: torch.long, label: torch.float32)`。例如，读取最终集需指定 `Split.FINAL_EVAL` 和 `Purpose.SCORE`。0.1 的底座训练入口仅生成和消费 `synthetic_smoke`。0.4 将单独保存留出结果，保留转换器的六份样本和原始清单，以通过留出检查的 `base_train` 训练并保存后续共用的底座权重。
+`MovieLensDataset(root, split, purpose, *, holdout_path=None)` 按用途校验访问权限、行数、字段和取值，每条返回 `(features: torch.long, label: torch.float32)`。以下三个建模入口必须传入 `holdout.json` 路径。Dataset 用当前源文件的电影 ID、物品表和清单中的种子重算分组，核对清单后按原始行序返回该组的全部交互。[数据读取实现](../src/coldstart/data/movielens.py)
+
+| split / purpose | 样本来源 | 返回的电影 |
+|---|---|---|
+| `base_train / base_train` | `base_candidate.npz` | 底座组 |
+| `meta_a / meta_support` | `meta_a.npz` | 伪新组 |
+| `meta_b / meta_query` | `meta_b.npz` | 伪新组 |
+
+划分入口以 `partition` 用途读取完整候选集和元训练 A/B。最终集只允许 `final_eval / score`，物品划分与底座预训练均无需打开最终集。全量读取与筛选读取的映射集中定义在 [schema.py](../src/coldstart/data/schema.py)。
 
 ### 3.2 物品元数据表 `items.npz`
 
@@ -72,8 +85,20 @@ warm_a/b ─▶ 0.5 固定到达批次 ─▶ 0.3 逐轮更新可见历史与电
 
 ### 3.4 配置与运行产物
 
-- `configs/base_smoke.yaml` 指定 `data.split`、合成样本数 `data.rows`、`seed`、`batch_size`、`steps` 和 Adam 的 `learning_rate`。
-- `scripts/train_base.py --config <yaml> --run-dir <目录>` 生成合成 NPZ，经 Dataset 和 DataLoader 训练并重载权重。运行目录含 `config.yaml`、`weights.pt` 和 `metrics.json`，其中记录代码提交、种子、训练步数、逐步 loss 和重载检查。复现命令见 [0.1 计划](plans/0.1-pytorch-port.md#拟执行的验收)。
+在仓库根目录执行下列命令生成可复用的物品划分及邻居统计。CLI 核对候选集与元训练 A/B 的老电影 ID 集合一致，再一次发布两份 JSON。同样输入可重复执行。
+
+```bash
+.venv/bin/python scripts/prepare_holdout.py --root artifacts/movielens --output artifacts/holdouts/0.4 --split-seed 42
+```
+
+| 派生产物 | 内容与使用者 |
+|---|---|
+| `artifacts/holdouts/0.4/holdout.json` | `version`、`algorithm`、`split_seed` 及升序的 `base_movies`、`pseudo_movies`、`test_movies`。固定种子 42 对排序后的老电影 ID 做 PCG64 置换，得到 952 部底座电影和 106 部伪新电影。测试组为物品表中其余 1127 部电影。三个建模入口共用此清单。 |
+| `artifacts/holdouts/0.4/neighbors.json` | 分 `pseudo`、`test` 两组记录每部目标电影的可用邻居位置数、0 至 10 个可用邻居的电影数分布，以及落入伪新组的位置数、总位置数和占比。0.6 的 GME 基线可据此解释邻居覆盖。原始邻居名单保存在物品表中。 |
+
+`scripts/train_base.py --config <yaml> --run-dir <目录>` 使用同一 Dataset、DataLoader 和底座完成训练与权重重载。两种配置共用 `seed`、`batch_size`、`learning_rate`。合成冒烟配置指定 `data.split: synthetic_smoke`、`data.rows` 和 `steps`。真实底座配置指定 `data.split: base_train`、`data.root`、`data.holdout_path` 和 `epochs`，每轮完整遍历底座组交互并保留尾批。[冒烟配置](../configs/base_smoke.yaml) · [真实底座配置](../configs/base_holdout.yaml)
+
+训练目录含 `config.yaml`、`weights.pt`（可直接载入 `BaseDNN` 的 state dict）及 `metrics.json`。指标记录代码提交、训练种子、实际行数、训练样本数、更新步数、训练 BCE 和重载检查。真实底座另存已验证的 `holdout.json` 副本，将其 SHA-256 记入指标。后续方法从 `runs/0.4-base/weights.pt` 加载共用底座。[实验登记表](EXPERIMENTS.md) · [训练命令](plans/0.4-item-holdout.md#验收标准)
 
 ## 4. 不变量与测试归属
 
@@ -86,7 +111,10 @@ warm_a/b ─▶ 0.5 固定到达批次 ─▶ 0.3 逐轮更新可见历史与电
 | 最终集只能以评分用途打开 | `test_final_eval_rejects_non_scoring_access_before_io`、`test_train_rejects_ineligible_splits` | 已实现（0.1） |
 | 槽位求和、零填充掩码、输出维度与可扩展槽位 | `test_base_dnn_slot_pooling_and_logits`、`test_base_dnn_uses_extended_slot_schema` | 已实现（0.1） |
 | 冒烟训练的批次、loss、权重可复现，重载推理一致 | `test_seeded_smoke_and_checkpoint_reload` | 已实现（0.1） |
-| 底座电影、伪新电影、测试电影两两不相交（§6.1） | 待 0.4 计划命名 | 规划（0.4） |
+| 三组电影两两互斥并覆盖物品表，划分独立于标签及行序，建模按清单保留同源样本（§6.1） | `test_holdout_is_reproducible_and_label_independent`、`test_holdout_views_match_source_rows`、`test_modeling_requires_verified_holdout` | 已实现（0.4） |
+| 物品划分与底座预训练独立于最终评分集（§6.5） | `test_holdout_does_not_open_final_eval`、`test_real_base_epoch_and_checkpoint_reload` | 已实现（0.4） |
+| 邻居覆盖只计入底座组的 ID 向量 | `test_neighbor_coverage_counts_only_base_movies` | 已实现（0.4） |
+| 底座按 epoch 遍历已留出数据，重载权重可复现 logits，复核所用清单摘要 | `test_real_base_epoch_and_checkpoint_reload`、`test_train_rejects_mixed_steps_and_epochs` | 已实现（0.4） |
 | 三个到达批次与最终评估集按（用户，电影）互斥（§6.3） | 待 0.5 计划命名 | 规划（0.5） |
 | 预测时 `hist` 只含已开放批次的正反馈（§6.4） | 待 0.2、0.3 计划命名 | 规划（0.2、0.3） |
 | 指标实现可由手算样例核对（§6.6） | 待 0.7 计划命名 | 规划（0.7） |
