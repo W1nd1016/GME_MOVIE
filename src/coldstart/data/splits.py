@@ -1,10 +1,14 @@
-"""Build and verify the fixed item-level MovieLens holdout."""
+"""Build and verify MovieLens item holdouts and warm-up arrivals."""
 
+import hashlib
 import json
 
 import numpy as np
 
 from .schema import NEIGHBOR_COUNT, VOCAB_SIZE
+
+
+WARM_ARRIVAL_ALGORITHM = "gme-warm-v1"
 
 
 def _movie_ids(values):
@@ -78,3 +82,49 @@ def neighbor_coverage(items, holdout):
             "pseudo_fraction": pseudo_positions / nearby.size,
         }
     return report
+
+
+def _warm_users_by_movie(keys, movies, source):
+    """Collect the 20 unique users for each expected movie in a warm source."""
+    keys = np.asarray(keys)
+    if keys.ndim != 2 or keys.shape[1] != 2 or not np.issubdtype(keys.dtype, np.integer):
+        raise ValueError(f"{source}: expected integer (user, movie) pairs")
+    grouped = {movie: set() for movie in movies}
+    for user, movie in keys.tolist():
+        if movie not in grouped:
+            raise ValueError(f"{source}: movie {movie} is outside the test movie list")
+        if not 0 < user < VOCAB_SIZE:
+            raise ValueError(f"{source}: movie {movie} has invalid user ID {user}")
+        users = grouped[movie]
+        if user in users:
+            raise ValueError(f"{source}: repeated user {user} for movie {movie}")
+        users.add(user)
+    for movie, users in grouped.items():
+        if len(users) != 20:
+            raise ValueError(f"{source}: movie {movie} has {len(users)} users, expected 20")
+    return grouped
+
+
+def warm_second_round_mask(a_keys, b_keys, test_movies):
+    """Verify A/B interaction keys and return the round-two mask in B source order."""
+    if not isinstance(test_movies, list) or not test_movies or any(
+        type(movie) is not int for movie in test_movies
+    ):
+        raise ValueError("holdout test_movies must be a nonempty list of integer IDs")
+    if len(_movie_ids(test_movies)) != len(test_movies):
+        raise ValueError("holdout test_movies contains duplicate movie IDs")
+
+    a_users = _warm_users_by_movie(a_keys, test_movies, "warm_a")
+    b_users = _warm_users_by_movie(b_keys, test_movies, "warm_b")
+    second_round = {}
+    for movie, users in b_users.items():
+        overlap = users & a_users[movie]
+        if overlap:
+            raise ValueError(f"warm_a and warm_b overlap for movie {movie}, user {min(overlap)}")
+
+        def rank(user):
+            key = f"{WARM_ARRIVAL_ALGORITHM}/{movie}/{user}".encode("ascii")
+            return hashlib.sha256(key).digest(), user
+
+        second_round[movie] = set(sorted(users, key=rank)[:10])
+    return np.array([user in second_round[movie] for user, movie in b_keys], dtype=bool)

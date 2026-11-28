@@ -21,6 +21,7 @@ def _slot_slices():
 
 
 SLOT_SLICES = _slot_slices()
+USER_INDEX = SLOT_SLICES["user"].start
 MOVIE_INDEX = SLOT_SLICES["movie"].start
 YEAR_INDEX = SLOT_SLICES["year"].start
 TITLE_SLICE = SLOT_SLICES["title"]
@@ -34,6 +35,9 @@ class Split(str, Enum):
     META_B = "meta_b"
     WARM_A = "warm_a"
     WARM_B = "warm_b"
+    WARM_1 = "warm_1"
+    WARM_2 = "warm_2"
+    WARM_3 = "warm_3"
     FINAL_EVAL = "final_eval"
     SYNTHETIC_SMOKE = "synthetic_smoke"
     BASE_TRAIN = "base_train"
@@ -48,13 +52,16 @@ class Purpose(str, Enum):
     SCORE = "score"
 
 
-# These uses can read every row in the converted source.
+# Each allowed use reads exactly one whole NPZ.
 _FULL_SPLIT_PURPOSES = {
     Split.BASE_CANDIDATE: {Purpose.PARTITION},
     Split.META_A: {Purpose.PARTITION},
     Split.META_B: {Purpose.PARTITION},
-    Split.WARM_A: {Purpose.PARTITION, Purpose.WARM_UPDATE},
-    Split.WARM_B: {Purpose.PARTITION, Purpose.WARM_UPDATE},
+    Split.WARM_A: {Purpose.PARTITION},
+    Split.WARM_B: {Purpose.PARTITION},
+    Split.WARM_1: {Purpose.WARM_UPDATE},
+    Split.WARM_2: {Purpose.WARM_UPDATE},
+    Split.WARM_3: {Purpose.WARM_UPDATE},
     Split.FINAL_EVAL: {Purpose.SCORE},
     Split.SYNTHETIC_SMOKE: {Purpose.BASE_TRAIN},
 }
