@@ -1,5 +1,6 @@
 """Train the MovieLens base DNN on CPU using an eligible split."""
 import argparse
+import hashlib
 import json
 import math
 import random
@@ -43,20 +44,36 @@ def write_synthetic_dataset(root, rows, seed):
     (root / "manifest.json").write_text(json.dumps(manifest))
 
 
+def load_training_data(data, split, seed):
+    if split == Split.BASE_TRAIN:
+        if not data.get("root") or not data.get("holdout_path") or "rows" in data:
+            raise ValueError("base_train requires root and holdout_path and uses all retained rows")
+        return MovieLensDataset(
+            data["root"], split, Purpose.BASE_TRAIN, holdout_path=data["holdout_path"],
+        )
+    if "root" in data or "holdout_path" in data:
+        raise ValueError("synthetic_smoke is generated internally and cannot take a root or holdout_path")
+    with TemporaryDirectory() as temp:
+        root = Path(temp)
+        write_synthetic_dataset(root, positive_int(data["rows"], "data.rows"), seed)
+        return MovieLensDataset(root, split, Purpose.BASE_TRAIN)
+
+
 def train(config_path, run_dir):
     config_bytes = Path(config_path).read_bytes()
     config = yaml.safe_load(config_bytes)
     data = config["data"]
     split = Split(data["split"])
     require_access(split, Purpose.BASE_TRAIN)
-    if "root" in data:
-        raise ValueError("synthetic_smoke is generated internally and cannot take a data root")
 
     seed = config["seed"]
     if type(seed) is not int or not 0 <= seed < 2**32:
         raise ValueError("seed must be an integer in [0, 2**32)")
     batch_size = positive_int(config["batch_size"], "batch_size")
-    steps = positive_int(config["steps"], "steps")
+    budget_key = "epochs" if split == Split.BASE_TRAIN else "steps"
+    if {"epochs", "steps"}.intersection(config) != {budget_key}:
+        raise ValueError(f"{split.value} requires {budget_key} as its only budget field (epochs or steps)")
+    budget = positive_int(config[budget_key], budget_key)
     learning_rate = float(config["learning_rate"])
     if not math.isfinite(learning_rate) or learning_rate <= 0:
         raise ValueError("learning_rate must be finite and positive")
@@ -66,30 +83,35 @@ def train(config_path, run_dir):
     torch.manual_seed(seed)
     torch.set_num_threads(1)
     torch.use_deterministic_algorithms(True)
-    with TemporaryDirectory() as temp:
-        data_root = Path(temp)
-        write_synthetic_dataset(data_root, positive_int(data["rows"], "data.rows"), seed)
-        dataset = MovieLensDataset(data_root, split, Purpose.BASE_TRAIN)
-        loader = DataLoader(
-            dataset, batch_size=batch_size, shuffle=True,
-            generator=torch.Generator().manual_seed(seed),
-        )
-        batches = iter(loader)
-        model = BaseDNN()
-        optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-        criterion = nn.BCEWithLogitsLoss()
-        loss_history = []
-        for _ in range(steps):
-            try:
-                features, labels = next(batches)
-            except StopIteration:
-                batches = iter(loader)
-                features, labels = next(batches)
-            optimizer.zero_grad()
-            loss = criterion(model(features), labels)
-            loss.backward()
-            optimizer.step()
-            loss_history.append(loss.item())
+    dataset = load_training_data(data, split, seed)
+    loader = DataLoader(
+        dataset, batch_size=batch_size, shuffle=True,
+        generator=torch.Generator().manual_seed(seed),
+    )
+    steps = budget * len(loader) if budget_key == "epochs" else budget
+    batches = iter(loader)
+    model = BaseDNN()
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    criterion = nn.BCEWithLogitsLoss()
+    loss_history = []
+    samples_seen = 0
+    loss_sum = 0.0
+    for _ in range(steps):
+        try:
+            features, labels = next(batches)
+        except StopIteration:
+            batches = iter(loader)
+            features, labels = next(batches)
+        optimizer.zero_grad()
+        loss = criterion(model(features), labels)
+        batch_loss = loss.item()
+        if not math.isfinite(batch_loss):
+            raise RuntimeError("non-finite training BCE")
+        loss.backward()
+        optimizer.step()
+        loss_history.append(batch_loss)
+        samples_seen += len(labels)
+        loss_sum += batch_loss * len(labels)
 
     git_commit = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=PROJECT_ROOT, text=True
@@ -114,8 +136,15 @@ def train(config_path, run_dir):
             "git_commit": git_commit,
             "steps": steps,
             "loss": loss_history,
+            "rows": len(dataset),
+            "samples_seen": samples_seen,
+            "train_bce": loss_sum / samples_seen,
             "checkpoint_reload_verified": True,
         }
+        if split == Split.BASE_TRAIN:
+            metrics["epochs"] = budget
+            metrics["holdout_sha256"] = hashlib.sha256(dataset.holdout_bytes).hexdigest()
+            (output / "holdout.json").write_bytes(dataset.holdout_bytes)
         (output / "config.yaml").write_bytes(config_bytes)
         (output / "metrics.json").write_text(json.dumps(metrics, indent=2, allow_nan=False) + "\n")
         output.rename(run_dir)
@@ -128,4 +157,6 @@ if __name__ == "__main__":
     parser.add_argument("--run-dir", type=Path, required=True)
     args = parser.parse_args()
     metrics = train(args.config, args.run_dir)
+    if metrics["data_split"] == Split.BASE_TRAIN.value:
+        metrics = {name: value for name, value in metrics.items() if name != "loss"}
     print(json.dumps(metrics, indent=2))

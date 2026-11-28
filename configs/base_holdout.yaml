@@ -1,0 +1,8 @@
+data:
+  split: base_train
+  root: artifacts/movielens
+  holdout_path: artifacts/holdouts/0.4/holdout.json
+seed: 123
+batch_size: 128
+epochs: 1
+learning_rate: 0.001

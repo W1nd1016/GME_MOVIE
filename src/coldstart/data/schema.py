@@ -48,20 +48,26 @@ class Purpose(str, Enum):
     SCORE = "score"
 
 
-_SPLIT_PURPOSES = {
+# These uses can read every row in the converted source.
+_FULL_SPLIT_PURPOSES = {
     Split.BASE_CANDIDATE: {Purpose.PARTITION},
-    Split.META_A: {Purpose.PARTITION, Purpose.META_SUPPORT},
-    Split.META_B: {Purpose.PARTITION, Purpose.META_QUERY},
+    Split.META_A: {Purpose.PARTITION},
+    Split.META_B: {Purpose.PARTITION},
     Split.WARM_A: {Purpose.PARTITION, Purpose.WARM_UPDATE},
     Split.WARM_B: {Purpose.PARTITION, Purpose.WARM_UPDATE},
     Split.FINAL_EVAL: {Purpose.SCORE},
     Split.SYNTHETIC_SMOKE: {Purpose.BASE_TRAIN},
-    # Task 0.4 will bind this split to a verified item holdout.
-    Split.BASE_TRAIN: set(),
+}
+
+# Each modeling view selects a group from one converted source split.
+HOLDOUT_VIEWS = {
+    (Split.BASE_TRAIN, Purpose.BASE_TRAIN): (Split.BASE_CANDIDATE, "base_movies"),
+    (Split.META_A, Purpose.META_SUPPORT): (Split.META_A, "pseudo_movies"),
+    (Split.META_B, Purpose.META_QUERY): (Split.META_B, "pseudo_movies"),
 }
 
 
 def require_access(split, purpose):
     split, purpose = Split(split), Purpose(purpose)
-    if purpose not in _SPLIT_PURPOSES[split]:
+    if (split, purpose) not in HOLDOUT_VIEWS and purpose not in _FULL_SPLIT_PURPOSES.get(split, ()):
         raise ValueError("split '{}' cannot be used for '{}'".format(split.value, purpose.value))
