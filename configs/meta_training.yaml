@@ -1,0 +1,12 @@
+data_root: artifacts/movielens
+holdout_path: artifacts/holdouts/0.4/holdout.json
+base_run: runs/0.4-base
+split_seed: 2026
+seeds: [123, 456, 789]
+groups:
+  attribute: [25, 50, 85]
+  shared: [85]
+batch_size: 4
+inner_lr: 0.1
+learning_rate: 0.001
+checkpoints: [22, 110, 220, 440]

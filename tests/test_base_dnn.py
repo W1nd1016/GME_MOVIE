@@ -1,8 +1,10 @@
+import pytest
 import torch
 from torch import nn
 
 from coldstart.data.schema import SLOTS
 from coldstart.models.base_dnn import BaseDNN
+from coldstart.models.generators.attribute import MetaGenerator
 
 
 def test_base_dnn_slot_pooling_and_logits():
@@ -39,9 +41,74 @@ def test_base_dnn_slot_pooling_and_logits():
 def test_base_dnn_uses_extended_slot_schema():
     slots = (*SLOTS, ("semantic_id", 2))
     model = BaseDNN(slots=slots)
+    assert BaseDNN(slots=iter(slots)).feature_width == model.feature_width
     assert model.mlp[0].in_features == 90
     features = torch.zeros((3, 18), dtype=torch.long)
     features[:, -2:] = torch.tensor([12, 13])
     logits = model(features)
     assert logits.shape == (3,)
     assert torch.isfinite(logits).all()
+
+
+def test_movie_embedding_replaces_only_movie_slot():
+    # Reorder slots so the test also checks that replacement follows the slot name.
+    model = BaseDNN(slots=(("movie", 1), ("user", 1), ("other", 2)), vocab_size=10,
+                    embedding_dim=1).requires_grad_(False)
+    with torch.no_grad():
+        model.embedding.weight[:, 0] = torch.arange(10)
+        model.embedding.weight[0, 0] = 10
+        for layer in model.mlp:
+            if isinstance(layer, nn.Linear):
+                layer.weight.zero_()
+        model.mlp[0].weight[0] = torch.tensor([1, 2, 3])
+        model.mlp[2].weight[0, 0] = 1
+        model.mlp[4].weight[0, 0] = 1
+
+    features = torch.tensor([[1, 2, 3, 0], [4, 1, 1, 2]])
+    movie_vectors = model.embedding(features[:, 0]).requires_grad_()
+    logits = model(features, movie_embedding=movie_vectors)
+    torch.testing.assert_close(logits, model(features), rtol=0, atol=0)
+    features[:, 0] = 7
+    torch.testing.assert_close(model(features, movie_embedding=movie_vectors),
+                               torch.tensor([14., 15.]), rtol=0, atol=0)
+    logits.sum().backward()
+    torch.testing.assert_close(movie_vectors.grad, torch.ones_like(movie_vectors))
+    assert all(param.grad is None for param in model.parameters())
+    for wrong_shape in ((2,), (1, 1), (2, 2)):
+        with pytest.raises(ValueError, match="movie_embedding"):
+            model(features, movie_embedding=torch.zeros(wrong_shape))
+
+
+def test_attribute_initial_uses_masked_item_slots_and_signed_calibration():
+    embedding = nn.Embedding(12, 1, padding_idx=0).requires_grad_(False)
+    with torch.no_grad():
+        embedding.weight[:, 0] = torch.arange(12)
+        embedding.weight[0, 0] = 99
+    attributes = torch.tensor([[1, 3, 0, 4, 0, 0, 2, 0, 0, 0, 0],
+                               [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]])
+    generator = MetaGenerator(1, "attribute")
+    assert torch.equal(generator.initial(attributes, embedding), torch.zeros(2, 1))
+    adapted = torch.tensor([[-1.], [2.]])
+    histories = torch.tensor([[2.], [0.]])
+    assert torch.equal(generator.calibrate(adapted, histories), adapted)
+    with torch.no_grad():
+        generator.attribute.weight.copy_(torch.tensor([[-1., 2., 3.]]))
+        generator.calibration.weight.fill_(-3)
+    assert torch.equal(generator.initial(attributes, embedding), torch.tensor([[19.], [0.]]))
+    assert torch.equal(generator.calibrate(adapted, histories), torch.tensor([[-7.], [2.]]))
+    with pytest.raises(ValueError, match="attributes"):
+        generator.initial(torch.zeros(2, 16, dtype=torch.long), embedding)
+    with pytest.raises(ValueError, match="history"):
+        generator.calibrate(adapted, histories[:1])
+
+
+def test_shared_initial_starts_at_zero_and_learns_across_movies():
+    embedding = nn.Embedding(12, 2).requires_grad_(False)
+    attributes = torch.tensor([[0] * 11, [5] * 11])
+    generator = MetaGenerator(2, "shared")
+    initial = generator.initial(attributes, embedding)
+    assert torch.equal(initial, torch.zeros(2, 2))
+    initial.sum().backward()
+    shared, = generator.initial_parameters()
+    assert torch.equal(shared.grad, torch.full_like(shared, 2.0))
+    assert generator.calibration.weight.grad is None
